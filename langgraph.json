@@ -1,0 +1,7 @@
+{
+  "dependencies": ["langchain_openai", "./"],
+  "graphs": {
+    "okx_trade_agent": "./okx_trade_agent/agent.py:agent"
+  },
+  "env": "./.env"
+}
