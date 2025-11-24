@@ -344,7 +344,7 @@ def example_model_payload() -> Dict[str, Any]:
                 },
             },
             "DOGE/USDT": {"...": "..."},
-            "ETC/USDT": {"...": "..."},
+            "ETH/USDT": {"...": "..."},
             "SOL/USDT": {"...": "..."},
         },
     }
@@ -359,7 +359,7 @@ def debug_market_data(symbols: Sequence[str] | None = None, keep_candles: int = 
     """
 
     if not symbols:
-        symbols = ["BTC/USDT", "DOGE/USDT", "ETC/USDT", "SOL/USDT"]
+        symbols = ["BTC/USDT", "DOGE/USDT", "ETH/USDT", "SOL/USDT"]
 
     # 延迟导入，避免工具模块在未装依赖时立刻初始化 ccxt。
     try:

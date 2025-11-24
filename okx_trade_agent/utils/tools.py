@@ -12,8 +12,8 @@ import ccxt
 import pandas as pd
 from langchain_core.tools import tool
 
-from .get_exchange import get_exchange
-from .logger import get_logger
+from okx_trade_agent.utils.get_exchange import get_exchange
+from okx_trade_agent.utils.logger import get_logger
 
 
 # 获取项目根目录路径（即 .env 所在位置）
@@ -347,4 +347,6 @@ def test_environment():
     logger.info("=" * 60)
 
 if __name__ == '__main__':
-    debug_all_tools()
+    markets = get_exchange().load_markets()
+    print(markets)
+    print(markets.get("BTC/USDT"))

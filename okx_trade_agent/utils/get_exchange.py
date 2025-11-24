@@ -47,7 +47,8 @@ def _build_client_config() -> dict:
         "password": os.getenv("OKX_API_PASSPHRASE"),
         # 模拟盘默认打开；若要切换实盘可通过环境变量控制
         "headers": {"x-simulated-trading": os.getenv("OKX_SIMULATED", "0")},
-        "options": {"defaultType": "spot"},
+        # defaultType 可通过环境变量覆盖：spot / swap
+        "options": {"defaultType": os.getenv("OKX_DEFAULT_TYPE", "spot")},
     }
 
     if proxies:
