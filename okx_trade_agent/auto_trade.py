@@ -4,9 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
-import ccxt
-
-from okx_trade_agent.price_agent import price_agent
+from okx_trade_agent.price_agent import price_agent, SYSTEM_PROMPT
 from okx_trade_agent.utils.get_exchange import get_exchange
 from okx_trade_agent.utils.logger import get_logger
 from okx_trade_agent.utils.perp_market import PerpSymbolSnapshot, fetch_perp_snapshots
@@ -37,13 +35,13 @@ def _fmt_seq(seq: Sequence[float]) -> str:
 class AutoTradeAgent:
     """Periodic runner that feeds market/account context into the minimal price agent."""
 
-    exchange: ccxt.Exchange
+    exchange: Any
     symbols: List[str]
     cnt: int = 0
     baseline_usdt: float | None = None
     start_time: datetime
 
-    def __init__(self, exchange: ccxt.Exchange, symbols: List[str]):
+    def __init__(self, exchange: Any, symbols: List[str]):
         self.exchange = exchange
         self.symbols = symbols
         self.start_time = datetime.now(timezone.utc)
@@ -173,8 +171,8 @@ class AutoTradeAgent:
             account_block=account_block,
         )
 
-    async def run_30min_cycle(self):
-        """30分钟循环执行，使用精简 agent 完成决策。"""
+    async def run_3min_cycle(self):
+        """30分钟循环执行，价格触发可提前唤醒 agent。"""
         while True:
             self.cnt += 1
             nowtime_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -184,18 +182,27 @@ class AutoTradeAgent:
                 exchange=self.exchange, symbols=self.symbols, intraday_keep=INTRADAY_KEEP, context_keep=10
             )
             balances = self.exchange.fetch_balance()
-
             user_prompt = self.build_user_prompt(snapshots, balances)
-            messages = {"messages": [{"role": "user", "content": user_prompt}]}
-
+            messages = {"messages": [
+                    {"role": "user", "content": user_prompt}
+                ]
+            }
             result = price_agent.invoke(messages)
             log.info("Agent message list: %s", result)
             decision = result["structured_response"]
             log.info("Agent decision: %s", repr(decision))
 
             # TODO: translate decision JSON array into concrete trades using utils.tools.* as needed.
+            # 等待 30 分钟或价格订阅触发提前唤醒
+            try:
+                from okx_trade_agent.utils.subscription import SUBSCRIPTION_MANAGER
 
-            await asyncio.sleep(30 * 60)
+                SUBSCRIPTION_MANAGER.clear_event()
+                # 价格触发 -> 事件被 set，超时 -> 正常周期
+                await asyncio.wait_for(SUBSCRIPTION_MANAGER.wait_event(), timeout=30 * 60)
+                log.info("价格触发唤醒，提前进入下一轮循环")
+            except asyncio.TimeoutError:
+                log.info("常规30分钟周期唤醒")
 
 
 if __name__ == "__main__":
@@ -203,4 +210,4 @@ if __name__ == "__main__":
     exchange = get_exchange()
     symbols = load_symbols(default=DEFAULT_SYMBOLS)
     agent = AutoTradeAgent(exchange=exchange, symbols=symbols)
-    asyncio.run(agent.run_30min_cycle())
+    asyncio.run(agent.run_3min_cycle())

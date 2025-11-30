@@ -4,9 +4,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import ccxt
-import pandas as pd
 import logging
+import pandas as pd
 from dotenv import load_dotenv
 from langchain.agents import create_agent, AgentState
 from langchain.agents.middleware import before_model, after_model, wrap_tool_call, after_agent, before_agent
@@ -16,13 +15,9 @@ from langgraph.runtime import Runtime
 load_dotenv()
 
 # ---- 0) OKX (Demo) 客户端：现货、模拟盘 ----
-okx = ccxt.okx({
-    "apiKey": os.getenv("OKX_API_KEY"),
-    "secret": os.getenv("OKX_API_SECRET"),
-    "password": os.getenv("OKX_API_PASSPHRASE"),
-    "headers": {"x-simulated-trading": "1"},        # 模拟盘关键头
-    "options": {"defaultType": "spot"}               # 现货
-})
+from okx_trade_agent.utils.get_exchange import get_exchange
+
+okx = get_exchange()
 
 SYMBOL = "BTC/USDT"
 TIMEFRAME = "1m"

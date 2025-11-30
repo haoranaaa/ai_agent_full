@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from statistics import fmean
 from typing import Any, Dict, Iterable, List, Literal, Sequence
 
-import ccxt
 
 # NOTE: 模型当前只关心 BTC/USDT 等少量标的的 1m/30m/1h/1d 线，
 # 若未来扩展更多粒度，在这里追加即可。
@@ -85,7 +84,7 @@ def _to_candle(row: List[float]) -> Candle:
 
 
 def fetch_symbol_snapshot(
-    exchange: ccxt.Exchange,
+    exchange,
     symbol: str,
     timeframes: Iterable[Timeframe] = PREFERRED_TIMEFRAMES,
     limit: int = 120,
@@ -94,7 +93,7 @@ def fetch_symbol_snapshot(
     Pull the latest ticker and OHLCV series for a single symbol.
 
     Args:
-        exchange: ccxt exchange instance.
+        exchange: OKX client instance.
         symbol: trading pair like 'BTC/USDT'.
         timeframes: iterable of requested timeframes.
         limit: number of candles per timeframe.
@@ -128,7 +127,7 @@ def fetch_symbol_snapshot(
 
 
 def fetch_market_snapshot(
-    exchange: ccxt.Exchange,
+    exchange,
     symbols: Sequence[str],
     timeframes: Iterable[Timeframe] = PREFERRED_TIMEFRAMES,
     limit: int = 120,
@@ -136,7 +135,7 @@ def fetch_market_snapshot(
     """
     Fetch the structured market snapshot for multiple symbols.
 
-    Any exception from ccxt bubbles up so the caller can decide whether to retry
+    Any exception from the client bubbles up so the caller can decide whether to retry
     or fall back to cached data.
     """
     snapshots = {
@@ -352,7 +351,7 @@ def example_model_payload() -> Dict[str, Any]:
 
 def debug_market_data(symbols: Sequence[str] | None = None, keep_candles: int = 3) -> Dict[str, Any]:
     """
-    Quick helper for manual testing: hits OKX via ccxt, builds the payload, and prints it.
+    Quick helper for manual testing: hits OKX client, builds the payload, and prints it.
 
     Returns:
         Dict[str, Any]: the same payload that would be sent to the LLM.
@@ -361,7 +360,7 @@ def debug_market_data(symbols: Sequence[str] | None = None, keep_candles: int = 
     if not symbols:
         symbols = ["BTC/USDT", "DOGE/USDT", "ETH/USDT", "SOL/USDT"]
 
-    # 延迟导入，避免工具模块在未装依赖时立刻初始化 ccxt。
+    # 延迟导入，避免工具模块在未装依赖时立刻初始化客户端。
     try:
         from .tools import get_exchange
     except ImportError:

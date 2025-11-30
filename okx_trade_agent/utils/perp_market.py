@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Sequence
 
 import pandas as pd
-import ccxt
 
 from .logger import get_logger
 
@@ -143,7 +142,7 @@ def _compute_4h_indicators(df: pd.DataFrame, keep: int) -> Dict[str, Any]:
 
 
 def fetch_perp_snapshot(
-    exchange: ccxt.Exchange,
+    exchange,
     symbol: str,
     intraday_timeframe: AllowedTimeframe = "3m",
     intraday_keep: int = 10,
@@ -210,7 +209,7 @@ def fetch_perp_snapshot(
 
 
 def fetch_perp_snapshots(
-    exchange: ccxt.Exchange,
+    exchange,
     symbols: Sequence[str],
     intraday_keep: int = 10,
     context_keep: int = 10,

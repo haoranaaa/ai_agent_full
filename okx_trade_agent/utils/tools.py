@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 import logging
 from typing import Any, Dict
 
-import ccxt
 import pandas as pd
 from langchain_core.tools import tool
 
