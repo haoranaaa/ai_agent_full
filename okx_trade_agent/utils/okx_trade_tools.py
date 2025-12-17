@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 import okx.Account as Account
 import okx.MarketData as MarketData
@@ -187,15 +188,21 @@ def _quantize_size(inst_id: str, base_size: float) -> str:
     if not lot_sz:
         raise RuntimeError(f"合约缺少lotSz配置: {instrument}")
 
-    step = float(lot_sz)
-    if step <= 0:
+    try:
+        step_dec = Decimal(lot_sz)
+        size_dec = Decimal(str(base_size))
+    except InvalidOperation:
+        raise RuntimeError(f"无法解析下单精度: lotSz={lot_sz}, base_size={base_size}")
+    if step_dec <= 0:
         raise RuntimeError(f"无效的lotSz: {lot_sz}")
 
-    precision = abs(len(lot_sz.split(".")[1])) if "." in lot_sz else 0
-    multiples = int(base_size // step)
-    quantized = multiples * step
+    # 使用Decimal避免浮点误差导致的截断(如5.1//0.01=5.09)造成持仓残留
+    multiples = (size_dec / step_dec).to_integral_value(rounding=ROUND_DOWN)
+    quantized = multiples * step_dec
     if quantized <= 0:
         raise ValueError("订单数量过小，低于最小下单手数")
+
+    precision = abs(step_dec.as_tuple().exponent)
     return f"{quantized:.{precision}f}"
 
 
@@ -721,7 +728,7 @@ def place_okx_order(
     if set_leverage_result.get("code") not in [None, "0"]:
         raise RuntimeError(f"设置杠杆失败: {set_leverage_result}")
     LOGGER.info(f"设置杠杆成功: {set_leverage_result}")
-    cl_ord_id = f"{datetime.datetime.now().strftime('%Y%m%d')}{side}{'long' if posSide == 'long' else 'short'}{instId.split("-")[0]}{int(usdt_amount)}{leverage}{uuid.uuid4().hex[:4]}"
+    cl_ord_id = f"{datetime.datetime.now().strftime('%Y%m%d')}{side}{'long' if posSide == 'long' else 'short'}{instId.split('-')[0]}{int(usdt_amount)}{leverage}{uuid.uuid4().hex[:4]}"
 
     # USDT保证金 * 杠杆 -> 名义价值 -> 基础币数量
     base_size = usdt_amount * leverage / limit_px
@@ -741,8 +748,6 @@ def place_okx_order(
 
     # 合约张数(未量化)
     contracts = base_size / ct_val_f
-
-
 
     # 按 lotSz 量化张数
     sz = _quantize_size(instId, contracts)

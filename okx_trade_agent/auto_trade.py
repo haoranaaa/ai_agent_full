@@ -105,6 +105,19 @@ class AutoTradeAgent:
             base = inst_id.split("-")[0] if inst_id else p.get("symbol", "")
             current_price = price_map.get(base) or price_map.get(inst_id)
             qty = _to_float(p.get("pos") or p.get("position") or p.get("sz"))
+            pos_side_raw = p.get("posSide") or p.get("side") or p.get("direction")
+            pos_side = pos_side_raw.lower() if isinstance(pos_side_raw, str) else None
+            profit_target = _to_float(
+                p.get("profit_target")
+                or p.get("take_profit")
+                or p.get("tp")
+            )
+            stop_loss = _to_float(
+                p.get("stop_loss")
+                or p.get("sl")
+                or p.get("stopLoss")
+            )
+            invalidation_condition = p.get("invalidation_condition") or ""
             entry = _to_float(p.get("avgPx"))
             liq_px = _to_float(p.get("liqPx"))
             upl = _to_float(p.get("upl")) if p.get("upl") is not None else _to_float(p.get("uplRatio"))
@@ -128,10 +141,11 @@ class AutoTradeAgent:
                     "unrealized_pnl": upl,
                     "leverage": lev,
                     "exit_plan": {
-                        "profit_target": None,
-                        "stop_loss": None,
-                        "invalidation_condition": "",
+                        "profit_target": profit_target,
+                        "stop_loss": stop_loss,
+                        "invalidation_condition": invalidation_condition,
                     },
+                    "position_side": pos_side,
                     "confidence": None,
                     "risk_usd": None,
                     "notional_usd": notional,
@@ -205,12 +219,26 @@ class AutoTradeAgent:
             except Exception as exc:
                 log.warning("取消未成交订单失败: %s", exc)
 
-            snapshots = fetch_perp_snapshots(
-                exchange=self.exchange, symbols=self.symbols, intraday_keep=INTRADAY_KEEP, context_keep=10
-            )
+            try:
+                snapshots = fetch_perp_snapshots(
+                    exchange=self.exchange, symbols=self.symbols, intraday_keep=INTRADAY_KEEP, context_keep=10
+                )
+            except Exception as exc:
+                log.error("获取行情快照失败，跳过本轮: %s", exc)
+                await asyncio.sleep(60)
+                continue
+
+            try:
+                balances = self.exchange.fetch_balance()
+                positions = getattr(self.exchange, "fetch_positions", lambda: [])()
+            except Exception as exc:
+                log.error("获取账户信息失败，跳过本轮: %s", exc)
+                await asyncio.sleep(60)
+                continue
+
             account_data = {
-                "balances": self.exchange.fetch_balance(),
-                "positions": getattr(self.exchange, "fetch_positions", lambda: [])()
+                "balances": balances,
+                "positions": positions
             }
             user_prompt = self.build_user_prompt(snapshots, account_data)
             messages = {"messages": [
@@ -218,11 +246,16 @@ class AutoTradeAgent:
                 ]
             }
             log.info(user_prompt)
-            result = price_agent.invoke(messages)
+            try:
+                result = price_agent.invoke(messages)
+            except Exception as exc:
+                log.error("Agent 调用失败，跳过本轮: %s", exc)
+                await asyncio.sleep(60)
+                continue
             log.info("Agent message list: %s", result)
             decision = result["structured_response"]
             log.info("Agent decision: %s", repr(decision))
-            await asyncio.sleep(30 * 60)
+            await asyncio.sleep(10 * 60)
 
 
 if __name__ == "__main__":

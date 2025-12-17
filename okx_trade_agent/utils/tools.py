@@ -346,6 +346,6 @@ def test_environment():
     logger.info("=" * 60)
 
 if __name__ == '__main__':
-    markets = get_exchange().load_markets()
+    markets = get_exchange().fetch_positions()
     print(markets)
     print(markets.get("BTC/USDT"))

@@ -9,7 +9,9 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import ToolMessage
 
 from okx_trade_agent.utils.model_decision import ModelResult
 from okx_trade_agent.utils.price_tool import get_recent_candles
@@ -47,9 +49,21 @@ for _t in TOOLS:
     except Exception:
         pass
 
+@wrap_tool_call
+def _handle_tool_errors(request, handler):
+    """Return tool error to the model so it can retry/adjust."""
+    try:
+        return handler(request)
+    except Exception as exc:  # pragma: no cover - passthrough to model
+        return ToolMessage(
+            content=f"Tool error: {exc}",
+            tool_call_id=request.tool_call["id"],
+        )
+
 price_agent = create_agent(
     model="openai:deepseek-chat",
     tools=TOOLS,
     system_prompt=SYSTEM_PROMPT,
-    response_format=ToolStrategy(ModelResult)  # structured JSON + summaries
+    response_format=ToolStrategy(ModelResult),  # structured JSON + summaries
+    middleware=[_handle_tool_errors],
 )

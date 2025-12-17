@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
-
 import datetime
+import time
+from typing import Any, Callable, Dict, List, Optional
+
 
 from okx_trade_agent.utils.okx_trade_tools import (
     SIMULATED_FLAG,
@@ -42,6 +43,18 @@ def _symbol_to_inst_id(symbol: str) -> str:
             return f"{base}-{quote}-SWAP"
         return f"{base}-{quote}"
     return symbol
+
+
+def _retry_api_call(fn: Callable[[], Dict[str, Any]], max_attempts: int = 3, delays: tuple[int, ...] = (2, 4)) -> Dict[str, Any]:
+    """Retry helper for transient network/SSL errors."""
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception:
+            if attempt >= max_attempts - 1:
+                raise
+            delay = delays[attempt] if attempt < len(delays) else delays[-1]
+            time.sleep(delay)
 
 
 class OkxClient:
@@ -119,7 +132,7 @@ class OkxClient:
 
     # ---- account ----
     def fetch_balance(self) -> Dict[str, Any]:
-        res = self.account_api.get_account_balance()
+        res = _retry_api_call(self.account_api.get_account_balance)
         data = res.get("data", [])
         if not data:
             return {}
@@ -140,7 +153,7 @@ class OkxClient:
         params: Dict[str, Any] = {"instType": inst_type}
         if inst_id:
             params["instId"] = inst_id
-        res = self.account_api.get_positions(**params)
+        res = _retry_api_call(lambda: self.account_api.get_positions(**params))
         return res.get("data", []) or []
 
     def fetch_account_and_positions(self, inst_type: str = "SWAP") -> Dict[str, Any]:
