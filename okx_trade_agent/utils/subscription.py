@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
+from langgraph.types import interrupt
 
 try:
     from okx.websocket.WsPublicAsync import WsPublicAsync
@@ -34,7 +35,8 @@ class PriceSubscriptionManager:
     """Manage price-trigger subscriptions and provide a wake event for the runner."""
 
     def __init__(self) -> None:
-        self._event = asyncio.Event()  # shared wake signal for the main loop
+        # Shared event that can wake paused flows when trigger is hit.
+        self._event = asyncio.Event()
         self._ws: Optional[WsPublicAsync] = None
         self._ws_connected = False
         self._ws_lock = asyncio.Lock()
@@ -210,22 +212,45 @@ SUBSCRIPTION_MANAGER = PriceSubscriptionManager()
 
 
 @tool
-def subscribe_price_trigger(
+def await_price_trigger(
     instId: str,
     target_price: float,
     direction: str = "above",
     poll_interval: float = 5.0,
     tolerance: float = 0.0,
     max_checks: Optional[int] = None,
+    timeout: float = 1500.0,
 ) -> Dict[str, Any]:
-    """订阅价格触发器: 使用OKX WebSocket tickers (失败则轮询) 触发30分钟循环。
+    """单工具完成订阅并挂起: 注册价格触发器，然后 interrupt 等待外部 resume。
+
+    调用流程:
+        1) 模型调用本工具，会先注册订阅(WS优先，失败回退轮询)。
+        2) 立即触发 interrupt，返回 payload= {waiting...} 给上层，执行暂停。
+        3) 外部事件监听（基于 SUBSCRIPTION_MANAGER 的 event，或其他渠道）命中后，
+           使用 Command(resume={\"status\":\"triggered\"|\"timeout\",\"last_price\":...}) 恢复。
 
     Args:
-        instId: 合约或符号, 如 "BTC-USDT-SWAP" 或 "BTC/USDT:USDT" (将自动转SWAP instId)
+        instId: 合约或符号, 如 \"BTC-USDT-SWAP\" 或 \"BTC/USDT:USDT\" (自动转 SWAP instId)
         target_price: 触发价格
         direction: 'above' 达到或高于触发, 'below' 达到或低于触发
         poll_interval: 轮询间隔(秒, 仅在 WS 不可用时生效)
         tolerance: 触发容差, 用于浮点误差
         max_checks: 最大轮询次数, None 表示无限直到触发 (仅轮询模式)
+        timeout: 建议的最大等待秒数(外部可用来决定超时 resume)
+
+    Notes:
+        - 需要在 invoke 时提供 thread_id 并使用支持 interrupt 的运行时（LangGraph）。
+        - resume 时传入的 payload 会作为 interrupt 的返回值继续后续逻辑。
     """
-    return SUBSCRIPTION_MANAGER.subscribe(instId, float(target_price), direction, poll_interval, tolerance, max_checks)
+    inst_id_norm = _normalize_inst_id(instId)
+    SUBSCRIPTION_MANAGER.subscribe(inst_id_norm, float(target_price), direction, poll_interval, tolerance, max_checks)
+    payload = {
+        "status": "waiting_for_price",
+        "instId": inst_id_norm,
+        "target_price": target_price,
+        "direction": direction,
+        "timeout": timeout,
+        "hint": "resume with {'status': 'triggered'|'timeout', 'last_price': <optional>}",
+    }
+    resume_val = interrupt(payload)
+    return {"status": resume_val.get("status", "unknown"), "payload": resume_val}

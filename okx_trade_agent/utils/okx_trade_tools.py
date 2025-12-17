@@ -18,6 +18,7 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import time
 
 import okx.Account as Account
 import okx.MarketData as MarketData
@@ -45,11 +46,41 @@ SUPPORTED_INST_IDS = {"BTC-USDT", "ETH-USDT", "BTC-USDT-SWAP"}  # 支持的交�
 BUY_CAP_USDT = 20  # 单笔买入上限(USDT)
 MIN_BALANCE_USDT = 5  # 最小余额要求(USDT)
 
+RETRY_CODES = {"50001"}  # service unavailable, retryable
+MAX_RETRIES = 2
+RETRY_DELAY = 0.3
+
 # 全局API客户端缓存
 _trade_client: Optional[Trade.TradeAPI] = None
 _account_client: Optional[Account.AccountAPI] = None
 _market_client: Optional[MarketData.MarketAPI] = None
 _public_client: Optional[PublicData.PublicAPI] = None
+
+
+class _RetryWrapper:
+    """轻量包装OKX SDK方法，对特定返回code做重试，不侵入业务逻辑。"""
+
+    def __init__(self, api_obj):
+        self._api = api_obj
+
+    def __getattr__(self, name):
+        attr = getattr(self._api, name)
+        if not callable(attr):
+            return attr
+
+        def wrapped(*args, **kwargs):
+            last_res = None
+            for i in range(MAX_RETRIES + 1):
+                res = attr(*args, **kwargs)
+                last_res = res
+                code = res.get("code")
+                if code not in RETRY_CODES:
+                    return res
+                if i < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY * (2 ** i))
+            return last_res
+
+        return wrapped
 
 
 # ==================== 客户端初始化 ====================
@@ -64,7 +95,7 @@ def _get_trade_client() -> Trade.TradeAPI:
     if _trade_client is None:
         if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
             raise RuntimeError("OKX API认证信息缺失,请检查.env文件配置")
-        _trade_client = Trade.TradeAPI(API_KEY, API_SECRET, API_PASSPHRASE, False, SIMULATED_FLAG)
+        _trade_client = _RetryWrapper(Trade.TradeAPI(API_KEY, API_SECRET, API_PASSPHRASE, False, SIMULATED_FLAG))
         LOGGER.info(f"已初始化OKX交易API客户端 (模拟盘: {SIMULATED_FLAG})")
     return _trade_client
 
@@ -75,7 +106,7 @@ def _get_account_client() -> Account.AccountAPI:
     if _account_client is None:
         if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
             raise RuntimeError("OKX API认证信息缺失,请检查.env文件配置")
-        _account_client = Account.AccountAPI(API_KEY, API_SECRET, API_PASSPHRASE, False, SIMULATED_FLAG)
+        _account_client = _RetryWrapper(Account.AccountAPI(API_KEY, API_SECRET, API_PASSPHRASE, False, SIMULATED_FLAG))
         LOGGER.info(f"已初始化OKX账户API客户端 (模拟盘: {SIMULATED_FLAG})")
     return _account_client
 
@@ -84,7 +115,7 @@ def _get_market_client() -> MarketData.MarketAPI:
     """获取市场数据API客户端(单例模式,无需认证)"""
     global _market_client
     if _market_client is None:
-        _market_client = MarketData.MarketAPI(flag=SIMULATED_FLAG)
+        _market_client = _RetryWrapper(MarketData.MarketAPI(flag=SIMULATED_FLAG))
         LOGGER.info(f"已初始化OKX市场数据API客户端 (模拟盘: {SIMULATED_FLAG})")
     return _market_client
 
@@ -93,7 +124,7 @@ def _get_public_client() -> PublicData.PublicAPI:
     """获取公共数据API客户端(单例模式,无需认证)"""
     global _public_client
     if _public_client is None:
-        _public_client = PublicData.PublicAPI(flag=SIMULATED_FLAG)
+        _public_client = _RetryWrapper(PublicData.PublicAPI(flag=SIMULATED_FLAG))
         LOGGER.info(f"已初始化OKX公共数据API客户端 (模拟盘: {SIMULATED_FLAG})")
     return _public_client
 
@@ -247,7 +278,7 @@ def place_market_buy(
             raise ValueError(f"USDT余额低于最小要求 {MIN_BALANCE_USDT} USDT")
 
         # 生成客户端订单ID
-        cl_ord_id = f"buy-{uuid.uuid4().hex[:12]}"
+        cl_ord_id = f"buy{uuid.uuid4().hex[:12]}"
 
         # 调用OKX API下单
         trade_api = _get_trade_client()
@@ -630,6 +661,7 @@ def place_okx_order(
     将下单金额视为保证金(USDT)，乘杠杆得到名义价值，再按限价换算数量并按lotSz向下取整。
     仅支持永续合约(如 BTC-USDT-SWAP)。
     """
+    get_logger().info(f"place_okx_order 调用, instId={instId}, side={side}, posSide={posSide}, usdt_amount={usdt_amount}, limit_px={limit_px}, take_profit={take_profit}, stop_loss={stop_loss}, td_mode={td_mode}, leverage={leverage}")
     if not instId.endswith("-SWAP"):
         raise ValueError(f"仅支持永续合约, 当前: {instId}")
     if side not in {"buy", "sell"}:
@@ -671,7 +703,6 @@ def place_okx_order(
 
     # 持仓模式需与 posSide 匹配: long/short 需双向仓, net 需单向仓
     desired_pos_mode = "long_short_mode" if posSide in {"long", "short"} else "net_mode"
-    pos_mode = None
     try:
         config = account_api.get_account_config()
         pos_mode = config.get("data", [{}])[0].get("posMode")
@@ -760,6 +791,91 @@ def place_okx_order(
     }
 
 
+@tool
+def close_position(
+    instId: str,
+    posSide: str,
+    close_px: float,
+    td_mode: str = "isolated",
+) -> Dict[str, Any]:
+    """平掉指定永续合约方向的持仓（reduce-only 限价单，默认全平）。
+
+    Args:
+        instId: 合约ID, 例如 "ETH-USDT-SWAP"
+        posSide: long 或 short（仅双向持仓）
+        close_px: 平仓限价
+        td_mode: 逐仓/全仓，默认沿用逐仓
+    """
+    LOGGER.info(
+        "close_position 调用, instId=%s, posSide=%s, close_px=%s, td_mode=%s",
+        instId, posSide, close_px, td_mode
+    )
+    if not instId.endswith("-SWAP"):
+        raise ValueError(f"仅支持永续合约, 当前: {instId}")
+    if posSide not in {"long", "short"}:
+        raise ValueError("posSide 需为 long 或 short")
+    try:
+        close_px_f = float(close_px)
+    except (TypeError, ValueError):
+        raise ValueError("close_px 需为数字")
+    if close_px_f <= 0:
+        raise ValueError("close_px 必须大于0")
+
+    trade_api, account_api = _get_clients()
+    positions_res = account_api.get_positions(instId=instId)
+    pos_list = positions_res.get("data", []) or []
+    position = next((p for p in pos_list if p.get("posSide") == posSide), None)
+    if not position:
+        raise ValueError(f"未找到 {instId} {posSide} 持仓")
+
+    raw_pos = position.get("pos") or position.get("sz")
+    try:
+        pos_size = float(raw_pos)
+    except (TypeError, ValueError):
+        pos_size = 0.0
+    if pos_size <= 0:
+        raise ValueError(f"{instId} {posSide} 持仓数量无效: {raw_pos}")
+
+    sz = _quantize_size(instId, pos_size)
+    order_side = "sell" if posSide == "long" else "buy"
+    tdMode = position.get("mgnMode") or td_mode or "isolated"
+    cl_ord_id = f"close{datetime.datetime.now().strftime('%Y%m%d')}{posSide}{uuid.uuid4().hex[:4]}"
+
+    payload = {
+        "instId": instId,
+        "tdMode": tdMode,
+        "side": order_side,
+        "posSide": posSide,
+        "ordType": "limit",
+        "px": str(close_px_f),
+        "sz": sz,
+        "reduceOnly": True,
+        "clOrdId": cl_ord_id,
+    }
+
+    LOGGER.info("提交平仓单: %s", payload)
+    result = trade_api.place_order(**payload)
+    LOGGER.info("平仓下单响应: %s", result)
+
+    if result.get("code") not in [None, "0"]:
+        raise RuntimeError(f"平仓下单失败: {result}")
+    order_data = result.get("data", [{}])[0]
+    if order_data.get("sCode") not in ["0", None]:
+        raise RuntimeError(f"平仓被拒绝: sCode={order_data.get('sCode')}, sMsg={order_data.get('sMsg')}")
+
+    return {
+        "instId": instId,
+        "side": order_side,
+        "posSide": posSide,
+        "tdMode": tdMode,
+        "order_id": order_data.get("ordId"),
+        "client_order_id": cl_ord_id,
+        "price": close_px_f,
+        "size": sz,
+        "raw_response": result,
+    }
+
+
 # ==================== 导出的工具列表 ====================
 
 TOOLS = [
@@ -772,6 +888,7 @@ TOOLS = [
     get_order_history,
     place_tp_sl_order,
     place_okx_order,
+    close_position,
 ]
 
 __all__ = [
@@ -784,6 +901,7 @@ __all__ = [
     "get_order_history",
     "place_tp_sl_order",
     "place_okx_order",
+    "close_position",
 ]
 
 

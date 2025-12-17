@@ -97,9 +97,9 @@ class OkxClient:
             ohlcv.append([ts, o, h, l, c, v])
         return ohlcv
 
-    def fetch_open_interest(self, symbol: str) -> Dict[str, Any]:
+    def fetch_open_interest(self, symbol: str, instType: str = "SWAP") -> Dict[str, Any]:
         inst_id = _symbol_to_inst_id(symbol)
-        res = self.public_api.get_open_interest(instId=inst_id)
+        res = self.public_api.get_open_interest(instId=inst_id, instType=instType)
         data = res.get("data", [])
         if not data:
             raise RuntimeError(f"No open interest for {inst_id}")
@@ -135,6 +135,45 @@ class OkxClient:
             balances[ccy] = {"free": avail, "used": used, "total": total}
         return balances
 
+    def fetch_positions(self, inst_type: str = "SWAP", inst_id: str | None = None) -> List[Dict[str, Any]]:
+        """Fetch all positions for the account (default SWAP)."""
+        params: Dict[str, Any] = {"instType": inst_type}
+        if inst_id:
+            params["instId"] = inst_id
+        res = self.account_api.get_positions(**params)
+        return res.get("data", []) or []
+
+    def fetch_account_and_positions(self, inst_type: str = "SWAP") -> Dict[str, Any]:
+        """Convenience helper: balances + positions."""
+        return {
+            "balances": self.fetch_balance(),
+            "positions": self.fetch_positions(inst_type=inst_type),
+        }
+
+    # ---- orders ----
+    def fetch_open_orders(self, inst_type: str = None, inst_id: str | None = None) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {}
+        if inst_id:
+            params["instId"] = inst_id
+        if inst_type:
+            params["instType"] = inst_type
+        res = self.trade_api.get_order_list(**params)
+        return res.get("data", []) or []
+
+    def cancel_open_orders(self, inst_type: str = None, inst_id: str | None = None) -> Dict[str, Any]:
+        orders = self.fetch_open_orders(inst_type=inst_type, inst_id=inst_id)
+        payload = []
+        for o in orders:
+            inst = o.get("instId")
+            ord_id = o.get("ordId")
+            if inst and ord_id:
+                payload.append({"instId": inst, "ordId": ord_id})
+        if not payload:
+            return {"requested": 0, "orders": [], "raw": None}
+        res = self.trade_api.cancel_multiple_orders(payload)
+        # 如果单条失败，OKX 会在 data 中给出 sCode/sMsg，可在上层判断。
+        return {"requested": len(payload), "orders": payload, "raw": res}
+
     # ---- trading (spot demo) ----
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         inst_id = _symbol_to_inst_id(symbol)
@@ -162,3 +201,10 @@ def get_okx_client() -> OkxClient:
 
 
 __all__ = ["OkxClient", "get_okx_client", "_symbol_to_inst_id"]
+
+
+if __name__ == "__main__":
+    # Quick manual test: cancel all open orders (any instType)
+    client = get_okx_client()
+    res = client.fetch_balance()
+    print("Cancel open orders result:", res)

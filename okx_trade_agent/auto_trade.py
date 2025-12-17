@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,11 +54,11 @@ class AutoTradeAgent:
 
     def _format_intraday_section(self, snap: PerpSymbolSnapshot) -> str:
         return (
-            f"Mid prices: {_fmt_seq(snap.prices_3m)}\n"
-            f"EMA indicators (20-period): {_fmt_seq(snap.ema20_3m)}\n"
-            f"MACD indicators: {_fmt_seq(snap.macd_3m)}\n"
-            f"RSI indicators (7-Period): {_fmt_seq(snap.rsi7_3m)}\n"
-            f"RSI indicators (14-Period): {_fmt_seq(snap.rsi14_3m)}\n"
+            # f"Mid prices: {_fmt_seq(snap.prices_3m)}\n"
+            # f"EMA indicators (20-period): {_fmt_seq(snap.ema20_3m)}\n"
+            # f"MACD indicators: {_fmt_seq(snap.macd_3m)}\n"
+            # f"RSI indicators (7-Period): {_fmt_seq(snap.rsi7_3m)}\n"
+            # f"RSI indicators (14-Period): {_fmt_seq(snap.rsi14_3m)}\n"
         )
 
     def _format_context_section(self, snap: PerpSymbolSnapshot) -> str:
@@ -80,45 +81,52 @@ class AutoTradeAgent:
             f"**Perpetual Futures Metrics:**\n"
             f"- Open Interest: Latest: {_fmt_num(snap.oi_latest)} | Average: {_fmt_num(snap.oi_avg)}\n"
             f"- Funding Rate: {_fmt_num(snap.funding_rate)}\n\n"
-            f"**Intraday Series (3-minute intervals, oldest → latest):**\n\n"
-            f"{self._format_intraday_section(snap)}\n"
+            # f"**Intraday Series (3-minute intervals, oldest → latest):**\n\n"
+            # f"{self._format_intraday_section(snap)}\n"
             f"**Longer-term Context (4-hour timeframe):**\n\n"
             f"{self._format_context_section(snap)}\n"
-            f"Raw 3m candles (oldest→latest): {snap.raw_candles_3m}\n"
-            f"Raw 4h candles (oldest→latest): {snap.raw_candles_4h}\n"
+            # f"Raw 3m candles (oldest→latest): {snap.raw_candles_3m}\n"
+            # f"Raw 4h candles (oldest→latest): {snap.raw_candles_4h}\n"
             f"\n---\n\n"
         )
 
-    def _account_blocks(
-        self,
-        balances: Dict[str, Any],
-        price_map: Dict[str, float],
-        symbols: Sequence[str],
-        min_notional_usdt: float = 0.1,
-    ) -> str:
-        usdt_total = float(balances.get("USDT", {}).get("total", 0.0))
+    def _prepare_positions(self, positions: List[Dict[str, Any]], price_map: Dict[str, float]) -> List[Dict[str, Any]]:
+        """Normalize OKX positions into the richer schema for prompts."""
+        prepared: List[Dict[str, Any]] = []
 
-        positions = []
-        skip_keys = {"info", "free", "used", "total", "timestamp", "datetime"}
-        for base, bal_info in balances.items():
-            if base in skip_keys or not isinstance(bal_info, dict):
-                continue
-            qty = float(bal_info.get("total", 0.0))
-            if qty <= 0:
-                continue
-            price = price_map.get(base, 0.0)
-            notional = qty * price
-            if notional < min_notional_usdt:
-                continue
-            positions.append(
+        def _to_float(val):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        for p in positions:
+            inst_id = p.get("instId") or p.get("symbol") or ""
+            base = inst_id.split("-")[0] if inst_id else p.get("symbol", "")
+            current_price = price_map.get(base) or price_map.get(inst_id)
+            qty = _to_float(p.get("pos") or p.get("position") or p.get("sz"))
+            entry = _to_float(p.get("avgPx"))
+            liq_px = _to_float(p.get("liqPx"))
+            upl = _to_float(p.get("upl")) if p.get("upl") is not None else _to_float(p.get("uplRatio"))
+            lev = _to_float(p.get("lever") or p.get("leverage"))
+            notional = _to_float(p.get("notionalUsd"))
+            if notional is None and current_price is not None:
+                base_qty = _to_float(p.get("posCcy")) or qty
+                if base_qty is not None:
+                    try:
+                        notional = base_qty * float(current_price)
+                    except Exception:
+                        notional = None
+
+            prepared.append(
                 {
-                    "symbol": base,
+                    "symbol": base or inst_id,
                     "quantity": qty,
-                    "entry_price": None,
-                    "current_price": price,
-                    "liquidation_price": None,
-                    "unrealized_pnl": None,
-                    "leverage": 1,
+                    "entry_price": entry,
+                    "current_price": _to_float(current_price),
+                    "liquidation_price": liq_px,
+                    "unrealized_pnl": upl,
+                    "leverage": lev,
                     "exit_plan": {
                         "profit_target": None,
                         "stop_loss": None,
@@ -129,12 +137,18 @@ class AutoTradeAgent:
                     "notional_usd": notional,
                 }
             )
+        return prepared
 
-        positions_str = "[]"
-        if positions:
-            positions_str = str(positions)
+    def _account_blocks(
+        self,
+        balances: Dict[str, Any],
+        price_map: Dict[str, float],
+        positions: List[Dict[str, Any]],
+    ) -> str:
+        usdt_total = float(balances.get("USDT", {}).get("total", 0.0))
 
-        account_value = usdt_total + sum(p["notional_usd"] for p in positions)
+        prepared_positions = self._prepare_positions(positions, price_map)
+        account_value = usdt_total + sum(p["notional_usd"] or 0 for p in prepared_positions)
 
         self._set_baseline(balances)
         return_pct = None
@@ -150,10 +164,14 @@ class AutoTradeAgent:
             f"- Available Cash: ${usdt_total}\n"
             f"- **Current Account Value:** ${account_value}\n\n"
             "**Current Live Positions & Performance:**\n\n"
-            f"{positions_str}\n\n"
+            f"{json.dumps(prepared_positions, ensure_ascii=False, indent=2)}\n\n"
         )
 
-    def build_user_prompt(self, snapshots: Dict[str, PerpSymbolSnapshot], balances: Dict[str, Any]) -> str:
+    def _format_positions(self, positions: List[Dict[str, Any]], price_map: Dict[str, float]) -> str:
+        prepared = self._prepare_positions(positions, price_map)
+        return json.dumps(prepared, ensure_ascii=False, indent=2) + "\n\n"
+
+    def build_user_prompt(self, snapshots: Dict[str, PerpSymbolSnapshot], account: Dict[str, Any]) -> str:
         elapsed = int((datetime.now(timezone.utc) - self.start_time).total_seconds() // 60)
 
         body_blocks = ""
@@ -164,7 +182,9 @@ class AutoTradeAgent:
             price_map[sym] = snap.current_price
             body_blocks += self._build_symbol_block(base, snap)
 
-        account_block = self._account_blocks(balances, price_map, self.symbols)
+        balances = account.get("balances", {})
+        positions = account.get("positions", [])
+        account_block = self._account_blocks(balances, price_map, positions)
         return PERP_USER_PROMPT.format(
             elapsed_minutes=elapsed,
             market_blocks=body_blocks,
@@ -178,31 +198,31 @@ class AutoTradeAgent:
             nowtime_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             log.info("当前日期：%s 开始执行第%s次循环", nowtime_str, self.cnt)
 
+            # 清理未成交订单，确保余额可用
+            try:
+                cancel_result = getattr(self.exchange, "cancel_open_orders", lambda: {"requested": 0})()
+                log.info("已尝试取消未成交订单: %s", cancel_result)
+            except Exception as exc:
+                log.warning("取消未成交订单失败: %s", exc)
+
             snapshots = fetch_perp_snapshots(
                 exchange=self.exchange, symbols=self.symbols, intraday_keep=INTRADAY_KEEP, context_keep=10
             )
-            balances = self.exchange.fetch_balance()
-            user_prompt = self.build_user_prompt(snapshots, balances)
+            account_data = {
+                "balances": self.exchange.fetch_balance(),
+                "positions": getattr(self.exchange, "fetch_positions", lambda: [])()
+            }
+            user_prompt = self.build_user_prompt(snapshots, account_data)
             messages = {"messages": [
                     {"role": "user", "content": user_prompt}
                 ]
             }
+            log.info(user_prompt)
             result = price_agent.invoke(messages)
             log.info("Agent message list: %s", result)
             decision = result["structured_response"]
             log.info("Agent decision: %s", repr(decision))
-
-            # TODO: translate decision JSON array into concrete trades using utils.tools.* as needed.
-            # 等待 30 分钟或价格订阅触发提前唤醒
-            try:
-                from okx_trade_agent.utils.subscription import SUBSCRIPTION_MANAGER
-
-                SUBSCRIPTION_MANAGER.clear_event()
-                # 价格触发 -> 事件被 set，超时 -> 正常周期
-                await asyncio.wait_for(SUBSCRIPTION_MANAGER.wait_event(), timeout=30 * 60)
-                log.info("价格触发唤醒，提前进入下一轮循环")
-            except asyncio.TimeoutError:
-                log.info("常规30分钟周期唤醒")
+            await asyncio.sleep(30 * 60)
 
 
 if __name__ == "__main__":

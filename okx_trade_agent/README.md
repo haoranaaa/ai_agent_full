@@ -1,23 +1,45 @@
 # OKX AI Trade Agent
 
-构建一个 AI 驱动的自动化交易系统，目标是跑出超越普通定存利息水平的稳健收益。在 OKX 模拟/永续环境里，结合实时行情、账户信息和大语言模型的决策能力，自动执行低频、风险可控的交易策略。
+An LLM-driven helper that reads perpetual market/context data, prompts a model for a structured decision, and (optionally) executes perp orders on OKX (simulated by default).
 
-## 项目构成
-- `okx_trade_agent/price_agent.py`：最小化的 LLM Agent，读取配置的交易对（默认 BTC、DOGE、ETC、SOL 永续），拉取 3m/4h 行情与账户数据，组装 prompt 调用模型。
-- `okx_trade_agent/auto_trade.py`：周期调度入口（默认 30 分钟循环），生成用户 prompt，调用 Agent 并预留执行交易的入口。
-- `okx_trade_agent/utils/`：
-  - `perp_market.py`：永续行情抓取与指标计算（EMA20/50、MACD、RSI7/14、ATR3/14、成交量、资金费率、持仓量）。
-  - `price_tool.py`：通用 K 线工具，支持 1m/3m/30m，多标的，输出最近 10 根 OHLCV。
-  - `model_decision.py`：模型输出的结构化定义（action: buy/sell_all/hold/wait 等）。
-  - 其余：`get_exchange.py`（OKX 连接与缓存）、`logger.py`、`market_data.py` 等。
-- `okx_trade_agent/prompts/`：系统提示与用户提示模板（spot/perp 版本集中管理）。
-- `langgraph.json`：注册 agent 图入口。
+## Quickstart
+- Clone repo, create venv, install deps: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` (or `pip install ccxt langchain langgraph python-dotenv pandas` per root instructions).
+- Copy `.env_example` → `.env`, fill `OKX_*` + `OPENAI_*` keys. Set `OKX_SIMULATED=1` for demo, `0` for live.
+- Run one-off agent call: `python okx_trade_agent/price_agent.py` (loads symbols from `OKX_SYMBOLS`, defaults to BTC/DOGE/ETH/SOL perps).
+- Run periodic loop (30m): `python okx_trade_agent/auto_trade.py` (feeds snapshots + account to the agent).
 
-## 当前做法（简版）
-1. 默认符号：`BTC/USDT:USDT, DOGE/USDT:USDT, ETC/USDT:USDT, SOL/USDT:USDT`（可通过环境变量 `OKX_SYMBOLS` 配置）。
-2. 数据侧：抓取永续 3m/4h K 线，计算 EMA/MACD/RSI/ATR/资金费率/持仓量，并格式化（最多 10 位有效数字）。
-3. Prompt：采用 `perp_user_prompt.txt` 模板，包含最新 10 根 3m K 线序列和 4h 上下文 + 账户余额/收益率（基于启动时 USDT 基线）。
-4. 模型：`openai:deepseek-chat`，系统约束在 `system_prompt.txt`，输出结构化 JSON（见 `ModelDecision`）。
-5. 运行：设置 `.env`（OKX key，`OKX_DEFAULT_TYPE=swap`），可选 `OKX_SYMBOLS`，执行 `python okx_trade_agent/auto_trade.py` 周期运行；或 `python okx_trade_agent/price_agent.py` 单次调用。
+## How It Works
+- Prompts: `okx_trade_agent/prompts/system_prompt.txt` (agent rules/tools), `okx_trade_agent/prompts/perp_user_prompt.txt` (market/account template).
+- Data prep (per loop in `okx_trade_agent/auto_trade.py`):
+  - Fetch perpetual snapshots via `utils/perp_market.py` (prices, EMA/MACD/RSI/ATR, OI, funding).
+  - Fetch balances/positions via `utils/get_exchange.py` → `utils/okx_client.py`.
+  - Build the user prompt block (market + account + structured positions JSON).
+- Decision layer: `okx_trade_agent/price_agent.py` creates a LangChain agent (`openai:deepseek-chat`) with tools:  
+  - `get_recent_candles`  
+  - `place_okx_order` (perp limit + TP/SL; `usdt_amount` is margin)  
+  - `close_position` (reduce-only limit, closes existing perp side)  
+  - `await_price_trigger` (poll-wait trigger)  
+  System prompt requires structured output (`ModelResult` in `utils/model_decision.py`).
+- Execution: `auto_trade.py` currently only logs the structured decision; hook actual order mapping as needed.
 
-> 下一步：将模型的决策 JSON 映射到具体下单工具，完善风控与持仓管理，并根据需要调整系统提示以适配永续多标的策略。
+## Configuration
+- `.env` keys: `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, optional `OKX_SIMULATED` (default `1`).
+- Symbols: set `OKX_SYMBOLS` (comma-separated, e.g., `BTC/USDT:USDT,ETH/USDT:USDT`); fallback is `utils/symbols.py::DEFAULT_PERP_SYMBOLS`.
+- Default settlement: `OKX_DEFAULT_TYPE=swap` set in `auto_trade.py` when run as main.
+- Prompts and tooling can be adjusted in `prompts/system_prompt.txt` and `prompts/perp_user_prompt.txt` without touching code.
+
+## Key Modules
+- Market/account: `utils/perp_market.py`, `utils/okx_client.py`, `utils/get_exchange.py`.
+- Trading tools: `utils/okx_trade_tools.py` (place/cancel, TP/SL, close position).
+- Agent wiring: `price_agent.py` (tools, system prompt, symbols), `auto_trade.py` (scheduler + prompt builder).
+- Models/schema: `utils/model_decision.py`.
+
+## Typical Run (auto_trade)
+- Start loop (`python okx_trade_agent/auto_trade.py`).
+- Every 30 minutes: refresh snapshots → build prompt → call `price_agent` → log structured decision.
+- You can intercept the decision to fan-out real orders (e.g., map `signal` to `place_okx_order`/`close_position`).
+
+## Notes
+- Simulated by default; flip `OKX_SIMULATED=0` only when you intend to trade live.
+- Tools are reduce-only for closes; `place_okx_order` expects a positive margin (`usdt_amount`) and computes contracts internally.
+- Keep prompts tight—model behavior (hold vs. trade, wait vs. immediate) is largely governed by `system_prompt.txt`.

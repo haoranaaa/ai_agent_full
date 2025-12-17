@@ -1,6 +1,7 @@
 .env
-.idea
+/.idea/
 /log
 /AGENTS.md
 /CLAUDE.md
 /.venv/
+/.claude/

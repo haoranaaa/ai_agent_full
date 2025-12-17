@@ -26,9 +26,10 @@ class ModelDecision(BaseModel):
 
 
 class ModelResult(BaseModel):
-    """Container for multiple decisions returned by the model."""
+    """Container for multiple decisions plus concise summaries."""
 
-    decisions: List[ModelDecision]
+    action_summary: str
+    reasoning_summary: str
 
 
 __all__ = ["ModelDecision", "ModelResult", "Signal"]

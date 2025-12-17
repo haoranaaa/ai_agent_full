@@ -13,8 +13,8 @@ from langchain.agents.structured_output import ToolStrategy
 
 from okx_trade_agent.utils.model_decision import ModelResult
 from okx_trade_agent.utils.price_tool import get_recent_candles
-from okx_trade_agent.utils.okx_trade_tools import place_okx_order
-from okx_trade_agent.utils.subscription import subscribe_price_trigger
+from okx_trade_agent.utils.okx_trade_tools import close_position, place_okx_order
+from okx_trade_agent.utils.subscription import await_price_trigger
 from okx_trade_agent.utils.symbols import DEFAULT_PERP_SYMBOLS, base_from_symbol, format_symbol_list, load_symbols
 
 load_dotenv()
@@ -38,10 +38,18 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.safe_substitute(
     ALLOWED_SYMBOLS=format_symbol_list(SYMBOLS),
 
 )
-# Agent with a single slim tool
+
+TOOLS = [get_recent_candles, place_okx_order, close_position, await_price_trigger]
+# Propagate tool errors back to the model instead of raising to caller.
+for _t in TOOLS:
+    try:
+        _t.handle_tool_error = True  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 price_agent = create_agent(
     model="openai:deepseek-chat",
-    tools=[get_recent_candles, place_okx_order, subscribe_price_trigger],
+    tools=TOOLS,
     system_prompt=SYSTEM_PROMPT,
-    response_format=ToolStrategy(ModelResult)  # structured JSON output for downstream execution
+    response_format=ToolStrategy(ModelResult)  # structured JSON + summaries
 )
