@@ -14,8 +14,8 @@ from .symbols import DEFAULT_PERP_SYMBOLS
 
 LOGGER = get_logger(__name__)
 
-AllowedTimeframe = Literal["1m", "3m", "30m"]
-SUPPORTED_TIMEFRAMES: tuple[AllowedTimeframe, ...] = ("1m", "3m", "30m")
+AllowedTimeframe = Literal["3m","15m", "30m", "1h", "4h", "1d"]
+SUPPORTED_TIMEFRAMES: tuple[AllowedTimeframe, ...] = ("3m","15m", "30m", "1h", "4h", "1d")
 MAX_CANDLES = 10
 DEFAULT_SYMBOLS: Sequence[str] = DEFAULT_PERP_SYMBOLS
 
@@ -34,7 +34,7 @@ def _format_candle(row: List[float]) -> Dict[str, Any]:
 
 @tool
 def get_recent_candles(symbol: str, timeframe: AllowedTimeframe) -> Dict[str, Any]:
-    """Return the latest 10 OHLCV candles for a supported symbol in 1m/3m/30m granularity."""
+    """Return the latest 10 OHLCV candles for a supported symbol in 15m/30m/1h/4h/1d granularity."""
 
     if timeframe not in SUPPORTED_TIMEFRAMES:
         raise ValueError(f"Unsupported timeframe: {timeframe}. Allowed: {SUPPORTED_TIMEFRAMES}")

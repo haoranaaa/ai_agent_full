@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
+import sys
 from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
@@ -42,12 +45,19 @@ class PriceSubscriptionManager:
         self._ws_lock = asyncio.Lock()
         self._watchers: Dict[str, List[Dict[str, Any]]] = {}
         self._subscribed: set[str] = set()
+        self._last_trigger: Optional[Dict[str, Any]] = None
 
     def clear_event(self) -> None:
         self._event.clear()
 
     async def wait_event(self) -> None:
         await self._event.wait()
+
+    def reset_last_trigger(self) -> None:
+        self._last_trigger = None
+
+    def last_trigger(self) -> Optional[Dict[str, Any]]:
+        return self._last_trigger
 
     def _trigger(self) -> None:
         self._event.set()
@@ -81,6 +91,15 @@ class PriceSubscriptionManager:
         self._subscribed.add(inst_id)
 
     async def _handle_message(self, message: Dict[str, Any]) -> None:
+        # SDK callbacks occasionally deliver raw JSON strings; normalize to dict.
+        if isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except Exception:
+                return
+        if not isinstance(message, dict):
+            return
+
         data = message.get("data", [])
         if not data:
             return
@@ -108,6 +127,14 @@ class PriceSubscriptionManager:
                 continue
 
             if hit:
+                self._last_trigger = {
+                    "inst_id": inst_id,
+                    "last_price": last_price,
+                    "target_price": target,
+                    "direction": direction,
+                    "mode": "websocket",
+                    "status": "triggered",
+                }
                 self._trigger()
                 w["status"] = "triggered"
                 w["last_price"] = last_price
@@ -140,6 +167,14 @@ class PriceSubscriptionManager:
                 raise ValueError("direction 需为 'above' 或 'below'")
 
             if hit:
+                self._last_trigger = {
+                    "inst_id": inst_id,
+                    "last_price": last_price,
+                    "target_price": target_price,
+                    "direction": direction,
+                    "mode": "polling",
+                    "status": "triggered",
+                }
                 self._trigger()
                 return {
                     "inst_id": inst_id,
@@ -151,6 +186,14 @@ class PriceSubscriptionManager:
 
             checks += 1
             if max_checks is not None and checks >= max_checks:
+                self._last_trigger = {
+                    "inst_id": inst_id,
+                    "last_price": last_price,
+                    "target_price": target_price,
+                    "direction": direction,
+                    "mode": "polling",
+                    "status": "expired",
+                }
                 return {
                     "inst_id": inst_id,
                     "last_price": last_price,
@@ -185,6 +228,7 @@ class PriceSubscriptionManager:
                 "status": "scheduled",
             }
             self._watchers.setdefault(inst_id_norm, []).append(watcher)
+            self._last_trigger = None
             return {
                 "inst_id": inst_id_norm,
                 "target_price": target_price,
@@ -198,6 +242,7 @@ class PriceSubscriptionManager:
             self._poll_price(inst_id_norm, float(target_price), direction, poll_interval, tolerance, max_checks)
         )
         task.add_done_callback(lambda t: None)
+        self._last_trigger = None
         return {
             "inst_id": inst_id_norm,
             "target_price": target_price,
@@ -254,3 +299,73 @@ def await_price_trigger(
     }
     resume_val = interrupt(payload)
     return {"status": resume_val.get("status", "unknown"), "payload": resume_val}
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Quick manual check for await_price_trigger subscription flow.")
+    parser.add_argument("--instId", default="BTC-USDT-SWAP", help="目标合约/符号，默认 BTC-USDT-SWAP")
+    parser.add_argument("--target-price", type=float, default=None, help="触发价格；缺省则使用当前价格以便快速命中")
+    parser.add_argument("--direction", choices=["above", "below"], default="above", help="above=价格达到或高于目标，below=价格达到或低于目标")
+    parser.add_argument("--poll-interval", type=float, default=5.0, help="轮询间隔(秒)，仅在 WebSocket 不可用时生效")
+    parser.add_argument("--tolerance", type=float, default=0.5, help="触发容差，默认 0.5 USD 便于快速测试")
+    parser.add_argument("--max-checks", type=int, default=None, help="最大轮询次数；缺省为无限")
+    parser.add_argument("--timeout", type=float, default=30.0, help="等待触发的超时时间(秒)")
+    return parser
+
+
+async def _demo_wait_for_price(args: argparse.Namespace) -> int:
+    inst_id = _normalize_inst_id(args.instId)
+    target_price = args.target_price
+
+    if target_price is None:
+        info = _get_current_price(inst_id)
+        target_price = float(info["last_price"])
+        print(f"[setup] 未提供 target_price，使用当前价 {target_price:.4f} 便于立即触发")
+
+    SUBSCRIPTION_MANAGER.clear_event()
+    SUBSCRIPTION_MANAGER.reset_last_trigger()
+    sub_meta = SUBSCRIPTION_MANAGER.subscribe(
+        inst_id,
+        float(target_price),
+        args.direction,
+        args.poll_interval,
+        args.tolerance,
+        args.max_checks,
+    )
+    print(f"[setup] 已注册订阅: {json.dumps(sub_meta, ensure_ascii=False)}")
+    print(f"[wait ] 等待价格触发 (timeout={args.timeout}s)…")
+
+    try:
+        await asyncio.wait_for(SUBSCRIPTION_MANAGER.wait_event(), timeout=args.timeout)
+    except asyncio.TimeoutError:
+        print("[result] 超时未触发，可以提高 tolerance 或调整 target_price 后重试。")
+        return 1
+
+    trigger = SUBSCRIPTION_MANAGER.last_trigger() or {"inst_id": inst_id, "status": "triggered"}
+    # 补充实时价格，便于对比
+    try:
+        current = _get_current_price(inst_id)
+        trigger.setdefault("last_price", current.get("last_price"))
+    except Exception as exc:  # pragma: no cover - 仅调试输出
+        print(f"[warn ] 无法获取当前价格: {exc}")
+
+    print(f"[result] 触发详情: {json.dumps(trigger, ensure_ascii=False)}")
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Simple CLI to verify await_price_trigger subscription logic without LangGraph."""
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    try:
+        return asyncio.run(_demo_wait_for_price(args))
+    except KeyboardInterrupt:
+        print("\n[exit ] 手动中断")
+        return 130
+    except Exception as exc:
+        print(f"[error] 运行失败: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -206,6 +206,13 @@ def _quantize_size(inst_id: str, base_size: float) -> str:
     return f"{quantized:.{precision}f}"
 
 
+def _format_optional(value: Optional[float]) -> Optional[str]:
+    """将可选数值格式化为字符串，便于直接传入OKX API。"""
+    if value is None:
+        return None
+    return str(value)
+
+
 @tool
 def get_account_balance(currency: str = "") -> Dict[str, Any]:
     """获取账户余额信息
@@ -652,6 +659,154 @@ def place_tp_sl_order(
 
 
 @tool
+def place_algo_order(
+    inst_id: str,
+    side: str,
+    ord_type: str,
+    sz: float,
+    td_mode: str = "cash",
+    pos_side: str = "",
+    trigger_px: float = None,
+    order_px: float = None,
+    trigger_px_type: str = "last",
+    take_profit_px: float = None,
+    take_profit_order_px: float = None,
+    stop_loss_px: float = None,
+    stop_loss_order_px: float = None,
+    callback_ratio: float = None,
+    callback_spread: float = None,
+    px_var: float = None,
+    px_spread: float = None,
+    sz_limit: float = None,
+    time_interval: str = None,
+    tag: str = "",
+) -> Dict[str, Any]:
+    """使用 OKX 算法单接口下单，可覆盖触发单/条件单/OCO/追踪止损/冰山单/TWAP。
+
+    模型可选择 ord_type:
+    - trigger: 价格触发后按 order_px 下单 (order_px=-1 为市价)
+    - conditional: 单独的止盈或止损
+    - oco: 同时设置止盈与止损
+    - trailing: 回调幅度触发 (callback_ratio 或 callback_spread)
+    - iceberg/twap: 按 px_var/px_spread 与 sz_limit 控制拆分执行
+    """
+    LOGGER.info(
+        "place_algo_order 请求: inst_id=%s side=%s ord_type=%s sz=%s td_mode=%s pos_side=%s",
+        inst_id,
+        side,
+        ord_type,
+        sz,
+        td_mode,
+        pos_side or "-",
+    )
+    supported_types = {"trigger", "conditional", "oco", "trailing", "iceberg", "twap"}
+    if ord_type not in supported_types:
+        raise ValueError(f"ord_type 需为 {supported_types}, 当前: {ord_type}")
+    if side not in {"buy", "sell"}:
+        raise ValueError("side 需为 buy 或 sell")
+    if inst_id not in SUPPORTED_INST_IDS:
+        raise ValueError(f"不支持的交易对: {inst_id}, 支持的交易对: {SUPPORTED_INST_IDS}")
+
+    sz_str = _quantize_size(inst_id, float(sz))
+    cl_ord_id = f"algo-{uuid.uuid4().hex[:12]}"
+
+    payload: Dict[str, Any] = {
+        "instId": inst_id,
+        "tdMode": td_mode,
+        "side": side,
+        "ordType": ord_type,
+        "sz": sz_str,
+        "clOrdId": cl_ord_id,
+        "tag": tag or None,
+    }
+    if pos_side:
+        payload["posSide"] = pos_side
+
+    if ord_type == "trigger":
+        if trigger_px is None or order_px is None:
+            raise ValueError("trigger 单需提供 trigger_px 与 order_px")
+        payload.update(
+            {
+                "triggerPx": str(trigger_px),
+                "triggerPxType": trigger_px_type,
+                "orderPx": str(order_px),
+            }
+        )
+    elif ord_type == "conditional":
+        if not take_profit_px and not stop_loss_px:
+            raise ValueError("conditional 单需提供 take_profit_px 或 stop_loss_px 至少一个")
+        if take_profit_px:
+            payload["tpTriggerPx"] = str(take_profit_px)
+            payload["tpOrdPx"] = _format_optional(take_profit_order_px) or "-1"
+        if stop_loss_px:
+            payload["slTriggerPx"] = str(stop_loss_px)
+            payload["slOrdPx"] = _format_optional(stop_loss_order_px) or "-1"
+    elif ord_type == "oco":
+        if not take_profit_px or not stop_loss_px:
+            raise ValueError("oco 单需同时提供 take_profit_px 与 stop_loss_px")
+        payload.update(
+            {
+                "tpTriggerPx": str(take_profit_px),
+                "tpOrdPx": _format_optional(take_profit_order_px) or "-1",
+                "slTriggerPx": str(stop_loss_px),
+                "slOrdPx": _format_optional(stop_loss_order_px) or "-1",
+            }
+        )
+    elif ord_type == "trailing":
+        if callback_ratio is None and callback_spread is None:
+            raise ValueError("trailing 单需提供 callback_ratio 或 callback_spread")
+        if callback_ratio:
+            payload["callbackRatio"] = str(callback_ratio)
+        if callback_spread:
+            payload["callbackSpread"] = str(callback_spread)
+        if trigger_px:
+            payload["triggerPx"] = str(trigger_px)
+            payload["triggerPxType"] = trigger_px_type
+    elif ord_type in {"iceberg", "twap"}:
+        if not (px_var or px_spread):
+            raise ValueError(f"{ord_type} 单需提供 px_var 或 px_spread")
+        payload["pxVar"] = _format_optional(px_var)
+        payload["pxSpread"] = _format_optional(px_spread)
+        if sz_limit:
+            payload["szLimit"] = _format_optional(sz_limit)
+        if order_px is not None:
+            payload["orderPx"] = str(order_px)
+        if time_interval:
+            payload["timeInterval"] = time_interval
+
+    trade_api = _get_trade_client()
+    LOGGER.info("提交算法单: %s", payload)
+    result = trade_api.place_algo_order(**payload)
+    LOGGER.info("算法单响应: %s", result)
+
+    if result.get("code") not in [None, "0"]:
+        raise RuntimeError(f"下单失败: {result}")
+    data = result.get("data", [{}])[0]
+    if data.get("sCode") not in ["0", None]:
+        raise RuntimeError(f"订单被拒绝: sCode={data.get('sCode')}, sMsg={data.get('sMsg')}")
+
+    LOGGER.info(
+        "算法单成功: algo_id=%s clOrdId=%s inst_id=%s ord_type=%s side=%s sz=%s",
+        data.get("algoId"),
+        cl_ord_id,
+        inst_id,
+        ord_type,
+        side,
+        sz_str,
+    )
+
+    return {
+        "inst_id": inst_id,
+        "side": side,
+        "ord_type": ord_type,
+        "algo_id": data.get("algoId"),
+        "client_order_id": cl_ord_id,
+        "submitted_size": sz_str,
+        "raw_response": result,
+    }
+
+
+@tool
 def place_okx_order(
     instId: str,
     side: str,
@@ -892,6 +1047,7 @@ TOOLS = [
     cancel_order,
     get_order_history,
     place_tp_sl_order,
+    place_algo_order,
     place_okx_order,
     close_position,
 ]
@@ -905,6 +1061,7 @@ __all__ = [
     "cancel_order",
     "get_order_history",
     "place_tp_sl_order",
+    "place_algo_order",
     "place_okx_order",
     "close_position",
 ]

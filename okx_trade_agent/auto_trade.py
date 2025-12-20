@@ -52,15 +52,6 @@ class AutoTradeAgent:
             self.baseline_usdt = float(balances.get("USDT", {}).get("total", 0.0))
             log.info("Baseline USDT set to %.4f", self.baseline_usdt)
 
-    def _format_intraday_section(self, snap: PerpSymbolSnapshot) -> str:
-        return (
-            # f"Mid prices: {_fmt_seq(snap.prices_3m)}\n"
-            # f"EMA indicators (20-period): {_fmt_seq(snap.ema20_3m)}\n"
-            # f"MACD indicators: {_fmt_seq(snap.macd_3m)}\n"
-            # f"RSI indicators (7-Period): {_fmt_seq(snap.rsi7_3m)}\n"
-            # f"RSI indicators (14-Period): {_fmt_seq(snap.rsi14_3m)}\n"
-        )
-
     def _format_context_section(self, snap: PerpSymbolSnapshot) -> str:
         return (
             f"20-Period EMA: {_fmt_num(snap.ema20_4h)} vs. 50-Period EMA: {_fmt_num(snap.ema50_4h)}\n"
@@ -100,6 +91,16 @@ class AutoTradeAgent:
             except (TypeError, ValueError):
                 return None
 
+        def _to_epoch_seconds(val):
+            try:
+                ts = float(val)
+            except (TypeError, ValueError):
+                return None
+            # OKX 时间戳通常是毫秒
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return ts
+
         for p in positions:
             inst_id = p.get("instId") or p.get("symbol") or ""
             base = inst_id.split("-")[0] if inst_id else p.get("symbol", "")
@@ -107,15 +108,18 @@ class AutoTradeAgent:
             qty = _to_float(p.get("pos") or p.get("position") or p.get("sz"))
             pos_side_raw = p.get("posSide") or p.get("side") or p.get("direction")
             pos_side = pos_side_raw.lower() if isinstance(pos_side_raw, str) else None
+            close_algos = p.get("closeOrderAlgo") or []
             profit_target = _to_float(
                 p.get("profit_target")
                 or p.get("take_profit")
                 or p.get("tp")
+                or p.get("tpTriggerPx")
             )
             stop_loss = _to_float(
                 p.get("stop_loss")
                 or p.get("sl")
                 or p.get("stopLoss")
+                or p.get("slTriggerPx")
             )
             invalidation_condition = p.get("invalidation_condition") or ""
             entry = _to_float(p.get("avgPx"))
@@ -130,6 +134,24 @@ class AutoTradeAgent:
                         notional = base_qty * float(current_price)
                     except Exception:
                         notional = None
+
+            c_time = _to_epoch_seconds(p.get("cTime") or p.get("ctime"))
+            now_ts = datetime.now(timezone.utc).timestamp()
+            hold_minutes = None
+            if c_time is not None:
+                try:
+                    delta_sec = max(0.0, now_ts - c_time)
+                    hold_minutes = int(delta_sec // 60)
+                except Exception:
+                    hold_minutes = None
+
+            # 从 closeOrderAlgo 中提取当前挂着的 TP/SL（OKX 会把关联的算法平仓单挂在这里）
+            if close_algos and isinstance(close_algos, list):
+                algo = close_algos[0] or {}
+                tp_candidate = algo.get("tpTriggerPx") or algo.get("tp")
+                sl_candidate = algo.get("slTriggerPx") or algo.get("sl")
+                profit_target = _to_float(profit_target or tp_candidate)
+                stop_loss = _to_float(stop_loss or sl_candidate)
 
             prepared.append(
                 {
@@ -146,6 +168,7 @@ class AutoTradeAgent:
                         "invalidation_condition": invalidation_condition,
                     },
                     "position_side": pos_side,
+                    "holding_minutes": hold_minutes,
                     "confidence": None,
                     "risk_usd": None,
                     "notional_usd": notional,
@@ -255,7 +278,7 @@ class AutoTradeAgent:
             log.info("Agent message list: %s", result)
             decision = result["structured_response"]
             log.info("Agent decision: %s", repr(decision))
-            await asyncio.sleep(10 * 60)
+            await asyncio.sleep(15 * 60)
 
 
 if __name__ == "__main__":
