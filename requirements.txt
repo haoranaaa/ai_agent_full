@@ -1,0 +1,26 @@
+# OKX AI 交易机器人依赖包
+
+# 核心依赖
+ccxt>=4.0.0
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+langgraph>=0.0.20
+
+# OKX 官方 SDK
+okx>=5.0.0
+
+# 数据处理
+pandas>=2.0.0
+
+# 环境配置
+python-dotenv>=1.0.0
+
+# HTTP 请求
+requests>=2.31.0
+
+# 日志
+pyyaml>=6.0
+
+# 其他
+typing-extensions>=4.0.0
