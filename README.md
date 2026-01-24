@@ -286,8 +286,8 @@ order = place_okx_order.invoke({
 
 ## 📧 联系方式
 
-- 提交 Issue：[GitHub Issues](https://github.com/miaoyuhan/ai_agent_full/issues)
-- Email：your.email@example.com
+- 提交 Issue：[GitHub Issues](https://github.com/haoranaaa/ai_agent_full/issues)
+- Email：997438111@qq.com
 
 ## 🔗 相关资源
 
