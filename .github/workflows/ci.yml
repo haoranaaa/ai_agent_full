@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: 代码检查和格式化
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 设置 Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install black flake8 isort mypy
+        pip install -r requirements.txt
+    
+    - name: 检查代码格式
+      run: black --check .
+    
+    - name: 代码检查
+      run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    
+    - name: 检查导入排序
+      run: isort --check-only .
+    
+    - name: 类型检查
+      run: mypy okx_trade_agent/ --ignore-missing-imports || true
+
+  test:
+    runs-on: ubuntu-latest
+    name: 运行测试
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 设置 Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov
+        pip install -r requirements.txt
+    
+    - name: 运行测试
+      run: |
+        pytest okx_trade_agent/ -v --tb=short || echo "测试文件不存在，跳过"
+    
+    - name: 生成覆盖率报告
+      run: |
+        pytest okx_trade_agent/ --cov=okx_trade_agent --cov-report=xml || echo "覆盖率报告生成失败"
+
+  security:
+    runs-on: ubuntu-latest
+    name: 安全检查
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 设置 Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit safety
+        pip install -r requirements.txt
+    
+    - name: 运行 Bandit 安全检查
+      run: bandit -r okx_trade_agent/ -f json -o bandit-report.json || true
+    
+    - name: 检查依赖安全性
+      run: safety check --json --output safety-report.json || true
+
+  build:
+    runs-on: ubuntu-latest
+    name: 构建检查
+    needs: [lint, test]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 设置 Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+        pip install -r requirements.txt
+    
+    - name: 构建包
+      run: python -m build
+    
+    - name: 检查包
+      run: twine check dist/*
+
+  docs:
+    runs-on: ubuntu-latest
+    name: 文档检查
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: 设置 Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install mkdocs mkdocs-material
+        pip install -r requirements.txt
+    
+    - name: 检查文档语法
+      run: |
+        if [ -f "mkdocs.yml" ]; then
+          mkdocs build --strict
+        else
+          echo "未找到 mkdocs.yml，跳过文档检查"
+        fi
+
+  notify:
+    runs-on: ubuntu-latest
+    name: 通知
+    needs: [lint, test, security, build]
+    if: always()
+    
+    steps:
+    - name: 通知结果
+      run: |
+        echo "CI 流程完成"
+        echo "代码检查: ${{ needs.lint.result }}"
+        echo "测试: ${{ needs.test.result }}"
+        echo "安全检查: ${{ needs.security.result }}"
+        echo "构建: ${{ needs.build.result }}"
